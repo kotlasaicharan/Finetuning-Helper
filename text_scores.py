@@ -87,3 +87,103 @@ def calculate_scores(df , true , pred):
 
 #explamples
 # scores , _ = calculate_scores( df, "reference" , "predicted")
+# with comet
+
+
+%%capture
+!pip install unbabel-comet 
+!pip install nltk rouge-score sacrebleu
+
+import nltk
+import numpy as np
+from rouge_score import rouge_scorer
+from sacrebleu.metrics import BLEU
+from nltk.translate.bleu_score import sentence_bleu
+from comet import download_model, load_from_checkpoint
+nltk.download('punkt')
+nltk.download('wordnet')
+
+
+from nltk.translate.bleu_score import sentence_bleu
+import numpy as np
+
+def calculate_scores(df, true, pred, source = None ):
+    """
+    Calculates BLEU, METEOR, ROUGE, and COMET scores for a dataframe.
+    
+    Args:
+        df: DataFrame containing the text columns
+        true: Name of the column containing reference/ground truth text
+        pred: Name of the column containing predicted/generated text
+    
+    Returns:
+        scores: Dictionary with average scores
+        all_scored: Dictionary with individual scores for each sample
+    """
+    # Initialize score lists
+    bleu_scores = {'bleu1': [], 'bleu2': [], 'bleu3': [], 'bleu4': []}
+    meteor_scores = []
+    rouge_scores = []
+    comet_scores = []
+
+    # Initialize scorers
+    rouge_scorer_obj = rouge_scorer.RougeScorer(['rouge1', 'rouge2', 'rougeL'], use_stemmer=True)
+    
+    # Prepare data for COMET
+    comet_data = [{
+        'src': str(row[source]) if source else '' ,  # Empty source for monolingual evaluation
+        'mt': str(row[pred]),
+        'ref': str(row[true])
+    } for _, row in df.iterrows()]
+    print(comet_data[0])
+    # Load COMET model
+    comet_model = load_from_checkpoint(download_model('wmt20-comet-da'))
+    # Calculate COMET scores
+    comet_scores = comet_model.predict(comet_data, batch_size=8, gpus=1)
+    
+    for idx, row in df.iterrows():
+        true_text = row[true]
+        predicted_text = row[pred]
+
+        # Calculate BLEU scores
+        reference = [true_text.split()]
+        candidate = predicted_text.split()
+        
+        # Calculate different BLEU variants
+        weights = [(1, 0, 0, 0), (0.5, 0.5, 0, 0), 
+                  (0.33, 0.33, 0.33, 0), (0.25, 0.25, 0.25, 0.25)]
+        for n, weight in enumerate(weights, 1):
+            bleu_scores[f'bleu{n}'].append(
+                sentence_bleu(reference, candidate, weights=weight)
+            )
+
+        # Calculate METEOR score
+        meteor_scores.append(
+            nltk.translate.meteor_score.single_meteor_score(
+                true_text.split(), predicted_text.split()
+            )
+        )
+
+        # Calculate ROUGE scores
+        rouge_scores.append(rouge_scorer_obj.score(true_text, predicted_text))
+
+    # Compile all scores
+    all_scored = {
+        'bleu1': bleu_scores['bleu1'],
+        'bleu2': bleu_scores['bleu2'],
+        'bleu3': bleu_scores['bleu3'],
+        'bleu4': bleu_scores['bleu4'],
+        'meteor': meteor_scores,
+        'rouge1': [score['rouge1'].fmeasure for score in rouge_scores],
+        'rouge2': [score['rouge2'].fmeasure for score in rouge_scores],
+        'rougeL': [score['rougeL'].fmeasure for score in rouge_scores],
+        'comet': comet_scores['scores']  # Add COMET scores
+    }
+
+    # Calculate average scores
+    scores = {
+        key: round(np.array(value).mean(), 4) 
+        for key, value in all_scored.items()
+    }
+
+    return scores, all_scored
